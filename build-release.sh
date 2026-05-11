@@ -50,10 +50,15 @@ echo "=== v2rayNG ${VERSION} → ${TARGET_REPO} ==="
 # 1. Bump version in app/build.gradle.kts (auto-increment versionCode)
 GRADLE_FILE="V2rayNG/app/build.gradle.kts"
 CUR_CODE=$(grep -E "^[[:space:]]*versionCode = " "$GRADLE_FILE" | head -1 | sed -E 's/.*versionCode = ([0-9]+).*/\1/')
-NEW_CODE=$((CUR_CODE + 1))
+CUR_NAME=$(grep -E "^[[:space:]]*versionName = " "$GRADLE_FILE" | head -1 | sed -E 's/.*versionName = "([^"]+)".*/\1/')
+if [ "$CUR_NAME" = "$VERSION" ]; then
+  NEW_CODE="$CUR_CODE"
+else
+  NEW_CODE=$((CUR_CODE + 1))
+fi
 sed -i -E "s|versionCode = [0-9]+|versionCode = ${NEW_CODE}|" "$GRADLE_FILE"
 sed -i -E "s|versionName = \".*\"|versionName = \"${VERSION}\"|" "$GRADLE_FILE"
-echo "  versionCode ${CUR_CODE} → ${NEW_CODE}, versionName → ${VERSION}"
+echo "  versionCode ${CUR_CODE} → ${NEW_CODE}, versionName ${CUR_NAME} → ${VERSION}"
 
 # 2. Initialize submodules
 echo ""
@@ -89,7 +94,7 @@ gomobile init >/dev/null 2>&1 || true
 # 6. libv2ray.aar
 echo ""
 echo ">>> Building libv2ray.aar..."
-gomobile bind -v -androidapi 24 -trimpath -ldflags='-s -w -buildid=' ./
+GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" gomobile bind -v -androidapi 24 -trimpath -ldflags='-s -w -buildid=' ./
 popd >/dev/null
 
 mkdir -p V2rayNG/app/libs
