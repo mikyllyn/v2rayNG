@@ -1,0 +1,113 @@
+name: Build APK (Fedarisha core)
+
+on:
+  workflow_dispatch:
+    inputs:
+      xray_ref:
+        description: 'mikyllyn/Xray-core-fedarisha ref to build (branch, tag or SHA). "main" is synced with latest XTLS/Xray-core main.'
+        required: false
+        default: 'main'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v2rayNG (with submodules)
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: '0'
+
+      - name: Checkout Fedarisha Xray-core
+        uses: actions/checkout@v6
+        with:
+          repository: mikyllyn/Xray-core-fedarisha
+          ref: ${{ github.event.inputs.xray_ref }}
+          path: fedcore
+          fetch-depth: '1'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4.0.1
+        with:
+          log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: '13114758'
+          packages: 'platforms;android-36.1 build-tools;36.1.0 platform-tools'
+
+      - name: Install NDK
+        run: |
+          echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --channel=0 --install "ndk;28.2.13676358"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          sed -i '10i\        ndkVersion = "28.2.13676358"' \
+            "${{ github.workspace }}/V2rayNG/app/build.gradle.kts"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Point AndroidLibXrayLite at the Fedarisha core
+        working-directory: AndroidLibXrayLite
+        run: |
+          go mod edit -replace github.com/xtls/xray-core="${{ github.workspace }}/fedcore"
+          go mod tidy
+
+      - name: Download geo assets (baked into the aar)
+        working-directory: AndroidLibXrayLite
+        run: |
+          mkdir -p assets data
+          curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat   -o data/geoip.dat
+          curl -sL https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat -o data/geosite.dat
+          curl -sL https://raw.githubusercontent.com/Loyalsoldier/geoip/release/geoip-only-cn-private.dat -o data/geoip-only-cn-private.dat
+          cp data/*.dat assets/
+
+      - name: Build libv2ray.aar (gomobile)
+        working-directory: AndroidLibXrayLite
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          gomobile init
+          GOFLAGS="-buildvcs=false" gomobile bind -v \
+            -androidapi 24 -trimpath -ldflags='-s -w -buildid= -checklinkname=0' ./
+          mkdir -p "${{ github.workspace }}/V2rayNG/app/libs"
+          cp libv2ray.aar "${{ github.workspace }}/V2rayNG/app/libs/"
+          echo "aar size: $(ls -lh libv2ray.aar | awk '{print $5}')"
+
+      - name: Build libhev-socks5-tunnel
+        run: |
+          bash compile-hevtun.sh
+          cp -r libs/* "${{ github.workspace }}/V2rayNG/app/libs/"
+
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Generate a self-signed keystore
+        run: |
+          keytool -genkeypair -v \
+            -keystore "${{ github.workspace }}/ci.jks" \
+            -storepass ci-build -keypass ci-build \
+            -alias ci -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=v2rayNG-fed-ci, OU=ci, O=ci, L=ci, S=ci, C=US"
+
+      - name: Build signed APKs
+        working-directory: V2rayNG
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          chmod 755 gradlew
+          ./gradlew clean assembleRelease -x licenseFdroidReleaseReport \
+            -Pandroid.injected.signing.store.file="${{ github.workspace }}/ci.jks" \
+            -Pandroid.injected.signing.store.password=ci-build \
+            -Pandroid.injected.signing.key.alias=ci \
+            -Pandroid.injected.signing.key.password=ci-build
+
+      - name: Upload APKs
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: v2rayNG-fed-apks
+          path: V2rayNG/app/build/outputs/apk/*/release/*.apk
